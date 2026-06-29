@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# 비밀/개인 정보 (절대 커밋 금지)
+.env
+.env.*
+*.local
+secrets/
+*.pem
+*.key
+*.keystore
+*.p12
+credentials*.json
+.aws/
+.ssh/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
