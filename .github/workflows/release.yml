@@ -1,0 +1,72 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14 # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch latest @mdi/svg
+        id: mdi
+        run: |
+          mkdir -p /tmp/mdi
+          npm install @mdi/svg@latest --prefix /tmp/mdi --no-audit --no-fund
+          VER=$(node -p "require('/tmp/mdi/node_modules/@mdi/svg/package.json').version")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Build universal binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/mdi \
+            target/aarch64-apple-darwin/release/mdi \
+            target/x86_64-apple-darwin/release/mdi
+          chmod +x dist/mdi
+
+      - name: Bake icons (PNG cache + augmented meta.json)
+        run: |
+          ./dist/mdi bake \
+            --svg-dir /tmp/mdi/node_modules/@mdi/svg/svg \
+            --meta    /tmp/mdi/node_modules/@mdi/svg/meta.json \
+            --out-dir assets \
+            --version "${{ steps.mdi.outputs.version }}" \
+            --size 88
+
+      - name: Assemble .alfredworkflow
+        run: |
+          # 워크플로 패키지 = 루트에 info.plist / 바이너리 / meta.json / icons/
+          pkg=pkg
+          mkdir -p "$pkg/icons"
+          cp workflow/info.plist "$pkg/"
+          cp workflow/icon.png "$pkg/" 2>/dev/null || true
+          cp dist/mdi "$pkg/"
+          cp assets/meta.json "$pkg/"
+          cp -R assets/icons/. "$pkg/icons/"
+          # 라이선스 고지 동봉 (워크플로우 MIT + MDI Apache 2.0)
+          cp LICENSE "$pkg/"
+          cp LICENSE-MDI "$pkg/"
+          ( cd "$pkg" && zip -qr -X "../ular-mdi.alfredworkflow" . )
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ular-mdi.alfredworkflow
+          body: |
+            MDI ${{ steps.mdi.outputs.version }} 동봉.
+            설치: `ular-mdi.alfredworkflow` 더블클릭. (Gatekeeper: README 참고)

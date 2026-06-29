@@ -2,6 +2,11 @@
 /target/
 **/*.rs.bk
 
+# 빌드 산출물 (릴리스 시 CI 가 생성, 커밋하지 않음)
+/assets/
+/dist/
+*.alfredworkflow
+
 # 비밀/개인 정보 (절대 커밋 금지)
 .env
 .env.*

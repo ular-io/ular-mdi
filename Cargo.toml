@@ -1,0 +1,27 @@
+[package]
+name = "ular-mdi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Fast offline Material Design Icons (Pictogrammers MDI) search for Alfred"
+repository = "https://github.com/ular-io/ular-mdi"
+
+[[bin]]
+name = "mdi"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+resvg = "0.45"        # re-exports usvg + tiny-skia (MPL-2.0)
+ureq = { version = "2", features = ["json"] }
+flate2 = "1"          # miniz_oxide backend, pure Rust
+tar = "0.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
