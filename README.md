@@ -57,15 +57,15 @@
 
 ## 빌드
 
+`.alfredworkflow` 패키지를 로컬에서 굽는다 (CI 와 동일한 절차):
+
 ```sh
-cargo build --release
-# 릴리스 자산 굽기 (CI 와 동일)
-npm install @mdi/svg@latest --prefix /tmp/mdi
-./target/release/mdi bake \
-  --svg-dir /tmp/mdi/node_modules/@mdi/svg/svg \
-  --meta    /tmp/mdi/node_modules/@mdi/svg/meta.json \
-  --out-dir assets --version <ver> --size 88
+./scripts/build-workflow.sh              # 현재 아키텍처
+./scripts/build-workflow.sh --universal  # Apple Silicon + Intel
 ```
+
+옵션: `--size N`(PNG px, 기본 88), `--mdi-version X.Y.Z`(기본 latest).
+산출물은 `ular-mdi.alfredworkflow`. 실제 배포는 태그 푸시 시 `.github/workflows/release.yml` 가 자동 수행한다.
 
 ## 라이선스
 
