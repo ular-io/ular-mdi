@@ -11,7 +11,12 @@ pub fn search(args: &[String]) -> Result<()> {
     let query = args.join(" ");
     let paths = Paths::discover()?;
     let cfg = Config::from_env();
-    let meta = Meta::read_file(&paths.meta_active())
+    let meta_path = paths.meta_active();
+    if !meta_path.exists() {
+        println!("{}", serde_json::to_string(&update::bootstrap(&paths)?)?);
+        return Ok(());
+    }
+    let meta = Meta::read_file(&meta_path)
         .with_context(|| "meta.json 로드 실패 (워크플로 자산 누락?)")?;
     let hits = search::search(&meta, &query, cfg.limit);
     let out = alfred::build(&hits, &paths, &cfg);

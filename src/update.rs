@@ -2,8 +2,11 @@ use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Read;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 use tar::Archive;
 
 use crate::config::Config;
@@ -22,13 +25,128 @@ struct Upstream {
     svgs: HashMap<String, String>,
 }
 
-pub fn run(paths: &Paths, cfg: &Config) -> Result<()> {
+/// 갱신 중 표시 파일. 이보다 오래된 잠금은 비정상 종료로 보고 무시한다.
+const LOCK_FILE: &str = ".updating";
+const LOCK_STALE: Duration = Duration::from_secs(15 * 60);
+/// 마지막 갱신 실패 메시지. 있으면 첫 검색이 자동 재시도하지 않는다(키 입력마다 재다운로드 방지).
+const FAILED_FILE: &str = "update-failed.txt";
+/// bootstrap 이 잠금을 잡은 뒤 넘겨준 자식 프로세스임을 표시하는 환경변수.
+const LOCK_HELD_ENV: &str = "MDI_LOCK_HELD";
+
+/// 잠금 파일. drop 시 삭제한다.
+struct Lock(PathBuf);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn lock_held(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age < LOCK_STALE)
+}
+
+fn try_lock(data: &Path) -> Result<Option<Lock>> {
+    let path = data.join(LOCK_FILE);
+    if lock_held(&path) {
+        return Ok(None);
+    }
+    let _ = std::fs::remove_file(&path); // 오래된 잠금
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(_) => Ok(Some(Lock(path))),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn data_dir(paths: &Paths) -> Result<PathBuf> {
     let data = paths
         .data_dir()
         .context("alfred_workflow_data 가 설정되지 않음 (Alfred 환경 밖)")?
         .to_path_buf();
     std::fs::create_dir_all(data.join("icons"))?;
+    Ok(data)
+}
 
+/// 아이콘이 하나도 없을 때(배포 패키지 첫 실행) Script Filter 출력.
+///
+/// 배포 패키지에는 아이콘이 없다(동기화 폴더 용량 절감). 갱신이 진행 중이 아니면
+/// 백그라운드로 `mdi update` 를 시작하고, `rerun` 으로 완료되면 결과가 자동으로 바뀐다.
+pub fn bootstrap(paths: &Paths) -> Result<serde_json::Value> {
+    let data = data_dir(paths)?;
+    if !lock_held(&data.join(LOCK_FILE)) {
+        if let Ok(msg) = std::fs::read_to_string(data.join(FAILED_FILE)) {
+            return Ok(status(
+                "MDI 아이콘 내려받기 실패",
+                &format!("{}  ·  mdi-update 로 다시 시도", msg.trim()),
+                None,
+            ));
+        }
+        if let Some(lock) = try_lock(&data)? {
+            spawn_update()?;
+            // 잠금은 자식이 넘겨받아 끝날 때 지운다.
+            std::mem::forget(lock);
+        }
+    }
+    Ok(status(
+        "MDI 아이콘 내려받는 중…",
+        "처음 한 번만 받는다. 완료되면 결과가 자동으로 표시된다",
+        Some(1.0),
+    ))
+}
+
+fn spawn_update() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    Command::new(std::env::current_exe()?)
+        .arg("update")
+        .env(LOCK_HELD_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // 입력이 바뀌면 Alfred 가 이전 Script Filter 를 종료한다. 갱신은 계속되도록 그룹을 분리한다.
+        .process_group(0)
+        .spawn()
+        .context("mdi update 시작 실패")?;
+    Ok(())
+}
+
+fn status(title: &str, subtitle: &str, rerun: Option<f64>) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "items": [{ "title": title, "subtitle": subtitle, "valid": false }]
+    });
+    if let Some(r) = rerun {
+        v["rerun"] = serde_json::json!(r);
+    }
+    v
+}
+
+pub fn run(paths: &Paths, cfg: &Config) -> Result<()> {
+    let data = data_dir(paths)?;
+    let _lock = if std::env::var_os(LOCK_HELD_ENV).is_some() {
+        Lock(data.join(LOCK_FILE))
+    } else {
+        match try_lock(&data)? {
+            Some(l) => l,
+            None => {
+                notify::post("MDI", "이미 아이콘을 갱신하는 중입니다");
+                return Ok(());
+            }
+        }
+    };
+    let _ = std::fs::remove_file(data.join(FAILED_FILE));
+    let r = fetch_and_bake(&data, paths, cfg);
+    if let Err(e) = &r {
+        let _ = std::fs::write(data.join(FAILED_FILE), format!("{e:#}"));
+        notify::post("MDI", &format!("갱신 실패: {e:#}"));
+    }
+    r
+}
+
+fn fetch_and_bake(data: &Path, paths: &Paths, cfg: &Config) -> Result<()> {
     let current = current_version(paths);
     let (latest, tarball_url) = npm::latest()?;
 
@@ -77,7 +195,10 @@ pub fn run(paths: &Paths, cfg: &Config) -> Result<()> {
 
     prune_orphans(&icons_dir, &meta)?;
 
-    std::fs::write(data.join("meta.json"), serde_json::to_vec(&meta)?)?;
+    // 검색은 meta.json 유무로 첫 내려받기 완료를 판단하므로 원자적으로 교체한다.
+    let tmp = data.join("meta.json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&meta)?)?;
+    std::fs::rename(&tmp, data.join("meta.json"))?;
     if let Some(state_path) = paths.state() {
         std::fs::write(
             state_path,
